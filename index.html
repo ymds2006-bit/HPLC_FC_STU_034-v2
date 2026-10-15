@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HPLC Run Decision Tool</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>HPLC Run Decision Tool</h1>
+      <p class="intro">Set and validate the method specifications, then upload CSV or XLSX exports. Valid runs receive a next-run recommendation.</p>
+    </header>
+
+    <nav class="app-tabs" aria-label="Main sections">
+      <button type="button" class="app-tab active" data-app-tab="analysisView" aria-selected="true">Run Analysis</button>
+      <button type="button" class="app-tab" data-app-tab="equipmentView" aria-selected="false">Equipment</button>
+    </nav>
+
+    <section id="analysisView">
+    <section class="card">
+      <h2>Method Specifications</h2>
+      <table>
+        <thead><tr><th>Target No. Compounds/Peaks</th><th>Maximum Run Time (min)</th><th>Resolution (Rmin)</th><th>Max Back-pressure (psi)</th></tr></thead>
+        <tbody><tr>
+          <td><label class="specification-input-label" for="peakSpec">Required peaks</label><input id="peakSpec" type="number" min="1" step="1" value="7" aria-describedby="peakSpecError"><small id="peakSpecError" class="field-validation" hidden></small></td>
+          <td><label class="specification-input-label" for="timeSpec">Maximum run time (min)</label><input id="timeSpec" type="number" min="0" step="any" value="15" aria-describedby="timeSpecError"><small id="timeSpecError" class="field-validation" hidden></small></td>
+          <td><label class="specification-input-label" for="resolutionSpec">Minimum resolution (Rmin)</label><input id="resolutionSpec" type="number" min="0" step="any" value="1.4" aria-describedby="resolutionSpecError"><small id="resolutionSpecError" class="field-validation" hidden></small></td>
+          <td><label class="specification-input-label" for="pressureSpec">Maximum back-pressure (psi)</label><input id="pressureSpec" type="number" min="0" step="any" value="4000" aria-describedby="pressureSpecError"><small id="pressureSpecError" class="field-validation" hidden></small></td>
+        </tr></tbody>
+      </table>
+      <div id="specValidationStatus" class="validation-state status-not-yet-validated" role="status" aria-live="polite">NOT YET VALIDATED — Run analysis to validate these method specifications.</div>
+      <div id="specValidationWarning" class="specification-warning" role="alert" aria-live="assertive" hidden>
+        <strong>⚠ WARNING — INVALID METHOD SPECIFICATIONS</strong>
+        <ul id="specValidationIssues"></ul>
+        <p>The decision engine has been paused because one or more values are invalid. Correct the listed specifications and run the analysis again.</p>
+      </div>
+      <button id="runAnalysis" type="button" class="run-analysis-button">Validate specifications and run analysis</button>
+      <p class="muted ambient-definition"><strong>Ambient run:</strong> Set Temp is 25°C. Measured Temp does not determine whether a run is ambient.</p>
+    </section>
+
+    <section class="card">
+      <h2>Upload a run</h2>
+      <label class="file-picker" for="runFile">Choose CSV or XLSX<input id="runFile" type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></label>
+      <p id="fileName" class="muted">No file selected</p>
+      <div class="saved-runs-controls">
+        <p id="savedRunStatus" class="muted" role="status" aria-live="polite">Uploaded run records are saved in this browser.</p>
+        <button id="clearSavedRuns" type="button">Clear saved runs</button>
+      </div>
+      <p id="error" class="error" role="alert" hidden></p>
+    </section>
+
+    <section class="card">
+      <h2>Column &amp; Flow Parameters</h2>
+      <p class="muted">These bookkeeping values are read from the uploaded run where available.</p>
+      <p id="nomenclatureWarning" class="nomenclature-edit-warning" role="status" hidden>Inconsistencies Found in Naming: Manually Edit Column &amp; Flow Parameters For accurate data recognition</p>
+      <div id="parameters"></div>
+    </section>
+
+    <section class="card">
+      <h2>Dashboard</h2>
+      <div id="decisionValidationStatus" class="decision-validation-status" role="status" aria-live="polite">NOT YET VALIDATED — Recommendations will appear after specifications are validated.</div>
+      <div id="decisionValidationWarning" class="decision-validation-warning" hidden>
+        <strong>⚠ INVALID METHOD SPECIFICATIONS — Decision generation is paused.</strong>
+        <ul id="decisionValidationIssues"></ul>
+        <p>Correct the specifications above, then validate and run the analysis again.</p>
+      </div>
+      <section id="intermediateObservation" class="intermediate-observation" aria-labelledby="intermediateObservationHeading" hidden></section>
+      <div class="table-wrap trials-table-wrap">
+        <table id="trialTable">
+          <thead><tr><th>Group No.</th><th>Trial No.</th><th>Ligand</th><th>Column Type</th><th>Coreshell</th><th>Pore (Å)</th><th>C-Load (%)</th><th>Length (mm)</th><th>ID (mm)</th><th>Particle (μm)</th><th>Solvent</th><th>%B</th><th>Flow (mL/min)</th><th>Conc. (mg/mL)</th><th>Sample Volume (µL)</th><th>Set Temp (°C)</th><th>Measured Temp (°C)</th><th>Wavelength (nm)</th><th>Decision</th><th>Actions</th><th>Peaks</th><th>Last-peak retention (min)</th><th>Lowest Rs (Rmin)</th><th>Back-pressure (psi)</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <details class="card">
+      <summary>Extraction log</summary>
+      <pre id="debugLog">Upload a run to see extracted peaks, width thresholds, and calculated values.</pre>
+    </details>
+    </section>
+
+    <aside id="solventNomogramPanel" class="solvent-nomogram-panel" role="region" aria-live="polite" aria-labelledby="solventNomogramHeading" hidden>
+      <div class="solvent-nomogram-header">
+        <h2 id="solventNomogramHeading">ACN → MeOH %B nomogram</h2>
+        <button id="closeSolventNomogram" type="button" aria-label="Close nomogram">Close</button>
+      </div>
+      <p id="solventNomogramPair" class="solvent-nomogram-pair"></p>
+      <svg id="solventNomogram" viewBox="0 0 560 220" role="img" aria-label="Two 0 to 100 percent scales showing the selected ACN and converted methanol values">
+        <text x="10" y="64" class="nomogram-axis-label">% MeOH</text>
+        <text x="10" y="148" class="nomogram-axis-label">% ACN</text>
+        <line x1="84" y1="60" x2="500" y2="60" class="nomogram-axis"></line>
+        <line x1="84" y1="144" x2="500" y2="144" class="nomogram-axis"></line>
+        <g class="nomogram-ticks">
+          <line x1="84" y1="54" x2="84" y2="66"></line><text x="84" y="44">0</text>
+          <line x1="125.6" y1="54" x2="125.6" y2="66"></line><text x="125.6" y="44">10</text>
+          <line x1="167.2" y1="54" x2="167.2" y2="66"></line><text x="167.2" y="44">20</text>
+          <line x1="208.8" y1="54" x2="208.8" y2="66"></line><text x="208.8" y="44">30</text>
+          <line x1="250.4" y1="54" x2="250.4" y2="66"></line><text x="250.4" y="44">40</text>
+          <line x1="292" y1="54" x2="292" y2="66"></line><text x="292" y="44">50</text>
+          <line x1="333.6" y1="54" x2="333.6" y2="66"></line><text x="333.6" y="44">60</text>
+          <line x1="375.2" y1="54" x2="375.2" y2="66"></line><text x="375.2" y="44">70</text>
+          <line x1="416.8" y1="54" x2="416.8" y2="66"></line><text x="416.8" y="44">80</text>
+          <line x1="458.4" y1="54" x2="458.4" y2="66"></line><text x="458.4" y="44">90</text>
+          <line x1="500" y1="54" x2="500" y2="66"></line><text x="500" y="44">100</text>
+          <line x1="84" y1="138" x2="84" y2="150"></line><text x="84" y="168">0</text>
+          <line x1="125.6" y1="138" x2="125.6" y2="150"></line><text x="125.6" y="168">10</text>
+          <line x1="167.2" y1="138" x2="167.2" y2="150"></line><text x="167.2" y="168">20</text>
+          <line x1="208.8" y1="138" x2="208.8" y2="150"></line><text x="208.8" y="168">30</text>
+          <line x1="250.4" y1="138" x2="250.4" y2="150"></line><text x="250.4" y="168">40</text>
+          <line x1="292" y1="138" x2="292" y2="150"></line><text x="292" y="168">50</text>
+          <line x1="333.6" y1="138" x2="333.6" y2="150"></line><text x="333.6" y="168">60</text>
+          <line x1="375.2" y1="138" x2="375.2" y2="150"></line><text x="375.2" y="168">70</text>
+          <line x1="416.8" y1="138" x2="416.8" y2="150"></line><text x="416.8" y="168">80</text>
+          <line x1="458.4" y1="138" x2="458.4" y2="150"></line><text x="458.4" y="168">90</text>
+          <line x1="500" y1="138" x2="500" y2="150"></line><text x="500" y="168">100</text>
+        </g>
+        <line id="nomogramConversionLine" class="nomogram-conversion-line"></line>
+        <circle id="nomogramMethanolPoint" class="nomogram-point" r="5"></circle>
+        <circle id="nomogramAcetonitrilePoint" class="nomogram-point" r="5"></circle>
+        <text id="nomogramMethanolValue" class="nomogram-value"></text>
+        <text id="nomogramAcetonitrileValue" class="nomogram-value"></text>
+      </svg>
+      <p class="solvent-nomogram-rule">Conversion rule: add 10 percentage points to ACN %B. Values outside the allowed 0–100% range are excluded from the run options.</p>
+    </aside>
+
+    <section id="equipmentView" hidden>
+      <section class="card">
+        <h2>HPLC Modules Guide</h2>
+        <p class="muted">Choose an HPLC module, then select one of its parameters. The guide explains what it controls, how it can affect retention, selectivity, and efficiency, and whether this decision tool recommends changing it.</p>
+        <nav class="equipment-tabs" aria-label="Equipment modules">
+          <button type="button" class="equipment-tab" data-equipment-module="solventBottles" aria-selected="false">Solvent Bottles</button>
+          <button type="button" class="equipment-tab" data-equipment-module="degasser" aria-selected="false">Degasser</button>
+          <button type="button" class="equipment-tab" data-equipment-module="pump" aria-selected="false">Pump</button>
+          <button type="button" class="equipment-tab" data-equipment-module="injector" aria-selected="false">Manual Injector / Autosampler</button>
+          <button type="button" class="equipment-tab" data-equipment-module="columnOven" aria-selected="false">Column/Column Oven</button>
+          <button type="button" class="equipment-tab" data-equipment-module="detector" aria-selected="false">Detector</button>
+        </nav>
+        <div id="equipmentLayout" class="equipment-layout">
+          <figure id="equipmentFigure" class="equipment-figure">
+            <div class="equipment-image-wrap">
+              <img src="hplc-equipment.png" alt="Schematic of an HPLC instrument showing solvent bottles, degasser, pump, manual injector or autosampler, column and column oven, and detector">
+              <button type="button" class="equipment-hotspot hotspot-solvent-bottles" data-equipment-module="solventBottles" aria-label="Show solvent bottles information">Solvent Bottles</button>
+              <button type="button" class="equipment-hotspot hotspot-degasser" data-equipment-module="degasser" aria-label="Show degasser information">Degasser</button>
+              <button type="button" class="equipment-hotspot hotspot-pump" data-equipment-module="pump" aria-label="Show pump information">Pump</button>
+              <button type="button" class="equipment-hotspot hotspot-injector" data-equipment-module="injector" aria-label="Show Manual Injector/Autosampler information">Manual Injector/Autosampler</button>
+              <button type="button" class="equipment-hotspot hotspot-oven" data-equipment-module="columnOven" aria-label="Show column and column oven information">Column/Column Oven</button>
+              <button type="button" class="equipment-hotspot hotspot-detector" data-equipment-module="detector" aria-label="Show detector information">Detector</button>
+            </div>
+            <figcaption>Choose a highlighted region or a module tab.</figcaption>
+          </figure>
+          <div id="equipmentDetails" class="equipment-details" aria-live="polite"></div>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="naming.js"></script>
+  <script src="stage-sequence.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
