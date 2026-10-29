@@ -9,7 +9,7 @@
     "i"
   );
   const samplePattern = new RegExp(
-    `^(.+?)(?:-([PUFR])|([PUFR]))?-(${number})x(${number})x(${number})-(amb(?:ient)?|RT|${number}(?:°?C)?)-(${number})(?:nm)?`,
+    `^(.+?)(?:-([PUFR])|([PUFR]))?-(${number})x(${number})x(${number})-(amb(?:ient)?|RT|T-?${number}(?:°?C)?|${number}(?:°?C)?)-(${number})(?:nm)?`,
     "i"
   );
   const columnTypes = { P: "Pinnacle", U: "Ultra", F: "Force", R: "Raptor" };
@@ -39,7 +39,7 @@
     const temperatureText = details[7];
     const temperature = /^amb(?:ient)?$/i.test(temperatureText) || /^RT$/i.test(temperatureText)
       ? 25
-      : Number(temperatureText.replace(/°?C$/i, ""));
+      : Number(temperatureText.replace(/^T-?/i, "").replace(/°?C$/i, ""));
     const wavelength = Number(details[8]);
     if (!Number.isFinite(percentB) || percentB < 0 || percentB > 100) return null;
     if (!Number.isFinite(temperature) || temperature < 10 || temperature > 100) return null;

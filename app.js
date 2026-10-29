@@ -2,6 +2,7 @@ const $ = id => document.getElementById(id);
 const trials = [];
 const TRIALS_STORAGE_KEY = "hplc-run-decision-tool.uploaded-runs.v1";
 const deletedSuggestions = new Set();
+const efficiencyInputsByTrial = new Map();
 let currentViewedTrialIndex = null;
 let parameterTrialIndex = null;
 let hasPositionedTrialTable = false;
@@ -15,6 +16,7 @@ let activeInjectorImage = "manual";
 let activeSolventNomogram = null;
 let activePumpPercentBDecision = null;
 let activeSelectivityDecision = null;
+let minimizedIntermediateObservationTrialIndex = null;
 function reportTrialStorageError(action, error) {
   $("error").textContent = `Uploaded run history could not be ${action}: ${error.message}`;
   $("error").hidden = false;
@@ -25,6 +27,7 @@ function persistUploadedTrials() {
     const records = trials.filter(trial => !trial.isSuggested).map(trial => {
       const {
         recommendation, nextPercentB, minimumPercentBResult, intermediatePercentBResult,
+        minimumPercentBCalculationDetails,
         intermediateObservationCandidates,
         prediction, sequencePlan, ...record
       } = trial;
@@ -612,9 +615,13 @@ function parseRun(rows, uploadedFileName = "") {
   const sampleName = b20SampleName || rowValue(rows, "sample name");
   const dataFileName = rowValue(rows, "data file name");
   const nomenclature = reconcileNomenclature(sampleName, dataFileName);
+  const uploadedFileNomenclature = parsedNomenclature(uploadedFileName);
+  const resolvedNomenclature = Object.keys(nomenclature.resolved).length
+    ? nomenclature.resolved
+    : uploadedFileNomenclature || {};
   const nomenclatureMismatch = Object.keys(nomenclature.conflicts).length > 0;
   const data = { groupNo: "", injectionNo: "", hplcNo: "", phNo: "", injectionVolume: null, sampleType: "", ligand: "", columnType: "", coreShell: "No", poreSize: "140", cLoad: "6", length: null, diameter: null, particleSize: null, solvent: "", percentB: null, flow: null, sampleConc: "", setTemperature: null, measuredTemperature: null, wavelength: null, peakCount: null, totalTime: null, resolution: null, pressure: null, sampleName, dataFileName, uploadedFileName, nomenclatureMismatch, nomenclatureConflicts: nomenclature.conflicts };
-  if (Object.keys(nomenclature.resolved).length) Object.assign(data, nomenclature.resolved);
+  if (Object.keys(resolvedNomenclature).length) Object.assign(data, resolvedNomenclature);
   const simple = {
     ligand: ["ligand", "stationary phase"], columnType: ["column type"],
     length: ["column length", "length"],
@@ -622,11 +629,21 @@ function parseRun(rows, uploadedFileName = "") {
     percentB: ["%b", "percent b"], flow: ["flow rate", "flow"], sampleConc: ["sample concentration", "sample conc"],
     setTemperature: ["set temperature", "set temp"], measuredTemperature: ["measured temperature"], wavelength: ["wavelength"]
   };
+  let extractedPercentB = null;
   Object.entries(simple).forEach(([key, names]) => {
     const value = labeledValue(rows, names) || headerValue(rows, names);
-    if (value !== "") data[key] = key === "percentB" ? numeric(value) : value;
+    if (value !== "") {
+      if (key === "percentB") {
+        const parsedPercentB = numeric(value);
+        extractedPercentB = parsedPercentB !== null && parsedPercentB >= 0 && parsedPercentB <= 100
+          ? parsedPercentB
+          : null;
+      }
+      data[key] = key === "percentB" ? extractedPercentB : value;
+    }
   });
-  Object.assign(data, nomenclature.resolved);
+  Object.assign(data, resolvedNomenclature);
+  if (extractedPercentB !== null) data.percentB = extractedPercentB;
   if (data.columnType) {
     data.coreShell = /^raptor$/i.test(String(data.columnType).trim()) ? "Yes" : "No";
   }
@@ -788,6 +805,7 @@ function clearTrialRecommendations() {
     trial.recommendation = null;
     trial.nextPercentB = null;
     trial.minimumPercentBResult = null;
+    trial.minimumPercentBCalculationDetails = null;
     trial.intermediatePercentBResult = null;
     trial.prediction = null;
     trial.sequencePlan = null;
@@ -995,12 +1013,25 @@ function formatMinimumRegressionRuns(points) {
   const formatRow = row => row.map((value, index) => value.padEnd(widths[index])).join(" | ");
   return [formatRow(columns.map(([heading]) => heading)), widths.map(width => "-".repeat(width)).join("-+-"), ...values.map(formatRow)].join("\n");
 }
-function minimumPercentB(history = trials, reference = history.filter(trial => !trial.isSuggested).at(-1)) {
+function minimumPercentB(history = trials, reference = history.filter(trial => !trial.isSuggested).at(-1), includeDetails = false) {
   const ambientRuns = minimumRetentionCycle(history, reference);
   if (!ambientRuns.length) {
     const result = MINIMUM_INTERMEDIATE_NOT_ENOUGH_RUNS;
     logDebug("[HPLC] Minimum-%B result", result);
-    return result;
+    return includeDetails ? {
+      result,
+      rows: [],
+      fitPoints: [],
+      slope: null,
+      intercept: null,
+      r2: null,
+      r2Threshold: MINIMUM_REGRESSION_R2_THRESHOLD,
+      targetRetention: null,
+      averageT0: null,
+      targetK: null,
+      targetLog10K: null,
+      predictedPercentB: null
+    } : result;
   }
   const pointCandidates = ambientRuns.map((trial, index) => {
     const t0 = Number.isFinite(trial.t0) && trial.t0 > 0 ? trial.t0 : null;
@@ -1086,7 +1117,30 @@ function minimumPercentB(history = trials, reference = history.filter(trial => !
       ambientCycleRuns: ambientRuns.length,
       usableRegressionPoints: points.length
     });
-    return result;
+    const details = {
+      result,
+      rows: pointCandidates.map(point => ({
+        injectionNo: point.trial.injectionNo,
+        percentB: point.x,
+        t0: point.t0,
+        retention: point.retention,
+        k: point.k,
+        log10K: point.y,
+        fitStatus: point.fitStatus,
+        used: false
+      })),
+      fitPoints: [],
+      slope: null,
+      intercept: null,
+      r2: null,
+      r2Threshold: MINIMUM_REGRESSION_R2_THRESHOLD,
+      targetRetention: null,
+      averageT0: null,
+      targetK: null,
+      targetLog10K: null,
+      predictedPercentB: null
+    };
+    return includeDetails ? details : result;
   }
   const fit = values => {
     const meanX = values.reduce((sum, point) => sum + point.x, 0) / values.length;
@@ -1158,12 +1212,35 @@ function minimumPercentB(history = trials, reference = history.filter(trial => !
     admissiblePercentBRange: [0, 100],
     withinPercentBRange
   });
+  const details = {
+    result,
+    rows: pointCandidates.map(point => ({
+      injectionNo: point.trial.injectionNo,
+      percentB: point.x,
+      t0: point.t0,
+      retention: point.retention,
+      k: point.k,
+      log10K: point.y,
+      fitStatus: point.fitStatus,
+      used: usable.includes(point)
+    })),
+    fitPoints: usable.map(point => ({ x: point.x, y: point.y, injectionNo: point.trial.injectionNo })),
+    slope: model?.a ?? null,
+    intercept: model?.b ?? null,
+    r2: model?.r2 ?? null,
+    r2Threshold: MINIMUM_REGRESSION_R2_THRESHOLD,
+    targetRetention,
+    averageT0,
+    targetK,
+    targetLog10K,
+    predictedPercentB
+  };
   if (!validFit) {
     logDebug("[HPLC] Minimum-%B result", result);
-    return result;
+    return includeDetails ? details : result;
   }
   logDebug("[HPLC] Minimum-%B result", { result, r2: model.r2, targetRetention, averageT0, targetK, targetLog10K });
-  return result;
+  return includeDetails ? details : result;
 }
 function intermediatePercentBCandidates(history = trials, reference = history.filter(trial => !trial.isSuggested).at(-1)) {
   const runs = intermediateObservationRuns(history, reference);
@@ -1332,6 +1409,48 @@ function matchesStage(trial, stage) {
     Number(trial.setTemperature) === stage.temperature &&
     ligandMatches;
 }
+function selectivityTargetsMet(runs, spec) {
+  return runs.some(trial =>
+    Number(trial.peakCount) >= spec.peaks &&
+    Number.isFinite(trial.resolution) &&
+    trial.resolution >= spec.resolution
+  );
+}
+function efficiencyInputsForTrial(index, trial) {
+  if (!efficiencyInputsByTrial.has(index)) {
+    efficiencyInputsByTrial.set(index, {
+      coreShell: trial.columnType
+        ? /^yes$/i.test(String(trial.coreShell || "")) ? "yes" : "no"
+        : "",
+      confirmedPackingFactor: null,
+      modeAField: "",
+      modeAValue: "",
+      modeAPackingFactor: "",
+      combinationLength: "",
+      combinationDiameter: "",
+      combinationParticleSize: "",
+      combinationFlow: "",
+      combinationPackingFactor: ""
+    });
+  }
+  return efficiencyInputsByTrial.get(index);
+}
+function currentPackingFactorForTrial(trial) {
+  const index = trials.indexOf(trial);
+  return index < 0 ? null : efficiencyInputsForTrial(index, trial).confirmedPackingFactor;
+}
+function flowchartEfficiencyDecision(data, spec) {
+  return HplcAwesomeEfficiency.flowchartDecision(
+    data,
+    {
+      time: spec.time,
+      pressure: spec.pressure,
+      resolution: spec.resolution
+    },
+    currentPackingFactorForTrial(data),
+    decisionRunTime(data)
+  );
+}
 const INITIAL_PERCENT_INVESTIGATION = [100, 90, 80, 70, 60, 50, 40];
 function actualRunsForStage(history, stage) {
   return history
@@ -1360,10 +1479,10 @@ function mandatorySequencePlan(data, history) {
       recommendation: `Initial ambient %B sequence: test ${initialSequence.nextPercentB}% B`
     };
   }
-  if (HplcStageSequence.targetWasMet(ambientRuns, spec.peaks)) {
+  if (selectivityTargetsMet(ambientRuns, spec)) {
     return {
       kind: "stopped",
-      recommendation: "A run in the initial %B sequence met the peak target; selectivity progression is stopped."
+      recommendation: "A run in the initial %B sequence met the peak and resolution targets; selectivity progression is stopped."
     };
   }
 
@@ -1393,10 +1512,10 @@ function mandatorySequencePlan(data, history) {
       recommendation: `Mandatory sequence: test calculated Minimum %B (${minimum}%)`
     };
   }
-  if (HplcStageSequence.targetWasMet(ambientAfterInitial, spec.peaks)) {
+  if (selectivityTargetsMet(ambientAfterInitial, spec)) {
     return {
       kind: "stopped",
-      recommendation: "The Minimum %B run met the peak target; selectivity progression is stopped."
+      recommendation: "The Minimum %B run met the peak and resolution targets; selectivity progression is stopped."
     };
   }
   const confirmedIntermediate = [...seriesHistory].reverse().find(trial =>
@@ -1430,12 +1549,12 @@ function mandatorySequencePlan(data, history) {
         : `Mandatory sequence: test calculated Minimum %B (${minimum}%)`
     };
   }
-  if (HplcStageSequence.targetWasMet(ambientAfterInitial, spec.peaks)) {
+  if (selectivityTargetsMet(ambientAfterInitial, spec)) {
     return {
       kind: "stopped",
       minimum,
       intermediate: confirmedIntermediate,
-      recommendation: "The Minimum/user-confirmed Intermediate %B sequence met the peak target; selectivity progression is stopped."
+      recommendation: "The Minimum/user-confirmed Intermediate %B sequence met the peak and resolution targets; selectivity progression is stopped."
     };
   }
 
@@ -1450,12 +1569,12 @@ function mandatorySequencePlan(data, history) {
       ? conversion.mappings.map(mapping => mapping.methanolPercentB)
       : previousPercentBs;
     const stageRuns = actualRunsForStage(seriesHistory, stage);
-    if (HplcStageSequence.targetWasMet(stageRuns, spec.peaks)) {
+    if (selectivityTargetsMet(stageRuns, spec)) {
       return {
         kind: "stopped",
         minimum,
         intermediate: confirmedIntermediate,
-        recommendation: `A run at ${stage.temperature}°C met the peak target; selectivity progression is stopped.`
+        recommendation: `A run at ${stage.temperature}°C met the peak and resolution targets; selectivity progression is stopped.`
       };
     }
     const coverage = HplcStageSequence.evaluateOrderedSequence(requiredPercentBs, stageRuns);
@@ -1497,12 +1616,12 @@ function mandatorySequencePlan(data, history) {
   for (const ligand of ["A", "B", "C", "D"]) {
     const stage = { ...ligandStage, ligand };
     const stageRuns = actualRunsForStage(seriesHistory, stage);
-    if (HplcStageSequence.targetWasMet(stageRuns, spec.peaks)) {
+    if (selectivityTargetsMet(stageRuns, spec)) {
       return {
         kind: "stopped",
         minimum,
         intermediate: confirmedIntermediate,
-        recommendation: `Ligand ${ligand} met the peak target; selectivity progression is stopped.`
+        recommendation: `Ligand ${ligand} met the peak and resolution targets; selectivity progression is stopped.`
       };
     }
     const coverage = HplcStageSequence.evaluateOrderedSequence(requiredPercentBs, stageRuns);
@@ -1530,9 +1649,9 @@ function mandatorySequencePlan(data, history) {
   };
 }
 function strategyRecommendation(data, history = trials.slice(0, trials.indexOf(data) + 1).filter(trial => !trial.isSuggested)) {
-  if (data.peakCount >= specifications().peaks) return null;
+  if (selectivityTargetsMet([data], specifications())) return null;
   const plan = mandatorySequencePlan(data, history);
-  if (!plan || !["blocked", "complete", "minimum", "intermediate", "intermediate-observe", "selectivity", "stopped"].includes(plan.kind)) return null;
+  if (!plan || !["blocked", "complete", "initial", "minimum", "intermediate", "intermediate-observe", "selectivity", "stopped"].includes(plan.kind)) return null;
   data.sequencePlan = plan;
   return plan?.recommendation || null;
 }
@@ -1638,15 +1757,7 @@ function decision(data, history = trials.slice(0, trials.indexOf(data) + 1).filt
     });
     return "Jump to Minimum %B OR Intermediate %B";
   }
-  if (runTime < spec.time && data.resolution !== null && data.resolution < spec.resolution) {
-    return runTime <= spec.time * 0.5
-      ? "Increase Length of Column to Increase N"
-      : "SELECTIVITY";
-  }
-  if (runTime < spec.time && data.resolution !== null && data.resolution >= spec.resolution) return "😊 increase F until R = spec to get most efficient method";
-  if (runTime > spec.time && data.resolution !== null && data.resolution < spec.resolution) return "Jump to SELECTIVITY Cycle";
-  if (runTime > spec.time && data.resolution !== null && data.resolution >= spec.resolution) return "N";
-  return "Targets met";
+  return flowchartEfficiencyDecision(data, spec);
 }
 function nextPercentB(data, recommendation, history = trials) {
   if (data.sequencePlan) return Number.isFinite(data.sequencePlan.percentB) ? data.sequencePlan.percentB : null;
@@ -1744,6 +1855,7 @@ function renderIntermediateObservation() {
   if (!activeTrial) {
     panel.hidden = true;
     panel.innerHTML = "";
+    minimizedIntermediateObservationTrialIndex = null;
     return;
   }
   const trialIndex = trials.indexOf(activeTrial);
@@ -1755,6 +1867,7 @@ function renderIntermediateObservation() {
     .filter(Number.isFinite));
   const candidates = activeTrial.intermediateObservationCandidates || [];
   const minimumEstimate = activeTrial.sequencePlan?.minimum ?? activeTrial.minimumPercentBResult;
+  const isMinimized = minimizedIntermediateObservationTrialIndex === trialIndex;
   const options = candidates.map(candidate =>
     `<option value="${candidate.percentB}">${candidate.percentB}% B candidate (between ${candidate.higherPercentB}% and ${candidate.lowerPercentB}% B)</option>`
   ).join("");
@@ -1780,8 +1893,12 @@ function renderIntermediateObservation() {
     </article>`;
   }).join("");
   panel.hidden = false;
-  panel.innerHTML = `<h3 id="intermediateObservationHeading">Intermediate %B — OBSERVE</h3>
-    <p class="observation-minimum-result"><strong>Calculated Minimum %B:</strong> ${escapeHtml(shown(minimumEstimate, "%"))}. This remains the separate course-based regression result; see the Extraction log for its data points, fit equation, and R².</p>
+  panel.innerHTML = `<div class="intermediate-observation-header">
+      <h3 id="intermediateObservationHeading">Intermediate %B — OBSERVE</h3>
+      <button type="button" id="toggleIntermediateObservation" aria-controls="intermediateObservationContent" aria-expanded="${!isMinimized}">${isMinimized ? "Expand" : "Minimise"}</button>
+    </div>
+    <div id="intermediateObservationContent" class="intermediate-observation-content"${isMinimized ? " hidden" : ""}>
+    <p class="observation-minimum-result"><strong>Calculated Minimum %B:</strong> ${escapeHtml(shown(minimumEstimate, "%"))}.</p>
     <p class="observation-instruction">OBSERVE: Compare the chromatograms as %B decreases. Identify the critical pair that limits separation. Choose an intermediate %B where the peaks may separate better without making the last-peak retention time unacceptably long.</p>
     <p class="observation-data-note"><strong>Data limitation:</strong> This importer does not read raw detector-signal chromatograms. The plots below show measured peak-table retention positions and reported widths, not reconstructed chromatograms. Peak numbers indicate elution order within each run; the app cannot reliably track compound identities or choose the best %B automatically.</p>
     <div class="observation-runs">${chromatograms || `<p>No eligible measured retention-cycle runs are available for comparison.</p>`}</div>
@@ -1794,7 +1911,7 @@ function renderIntermediateObservation() {
       <input id="intermediateObservationValue" type="number" min="0" max="100" step="0.1" inputmode="decimal" data-trial-index="${trialIndex}" aria-describedby="intermediateObservationStatus">
       <button type="button" id="confirmIntermediateObservation" data-trial-index="${trialIndex}">Confirm intermediate %B and generate next run</button>
       <p id="intermediateObservationStatus" role="status" aria-live="polite">A candidate is only a prompt. Inspect the measured peaks, then confirm your choice.</p>
-    </div>`;
+    </div></div>`;
 }
 function predictionPlan(data, recommendation, history = trials.slice(0, trials.indexOf(data) + 1).filter(trial => !trial.isSuggested)) {
   if (STRATEGY_RECOMMENDATIONS.includes(recommendation) && recommendation) {
@@ -1842,6 +1959,7 @@ function updateRecommendation(trial) {
     trial.recommendation = null;
     trial.nextPercentB = null;
     trial.minimumPercentBResult = null;
+    trial.minimumPercentBCalculationDetails = null;
     trial.intermediatePercentBResult = null;
     trial.prediction = null;
     return;
@@ -1855,9 +1973,11 @@ function updateRecommendation(trial) {
       "Jump to Minimum %B OR Intermediate %B",
       "Jump to Minimum %B THEN, Intermediate %B"
     ].includes(trial.recommendation);
-    trial.minimumPercentBResult = minimumIntermediateDecision
-      ? minimumPercentB(history, trial)
+    const minimumDetails = minimumIntermediateDecision
+      ? minimumPercentB(history, trial, true)
       : null;
+    trial.minimumPercentBResult = minimumDetails?.result ?? null;
+    trial.minimumPercentBCalculationDetails = minimumDetails;
     trial.intermediatePercentBResult = null;
     trial.intermediateObservationCandidates = trial.recommendation === "Jump to Minimum %B OR Intermediate %B"
       ? intermediatePercentBCandidates(history, trial)
@@ -1914,6 +2034,89 @@ function renderEffectFlow(effects) {
   return `<ul class="effect-flow-list">${effects.map(([label, effect]) =>
     `<li><strong>${escapeHtml(label)}</strong><span aria-hidden="true"> → </span>${escapeHtml(effect)}</li>`
   ).join("")}</ul>`;
+}
+function renderMinimumRegressionChart(details) {
+  const points = details?.fitPoints || [];
+  if (points.length < 3 || !Number.isFinite(details.slope) || !Number.isFinite(details.intercept) ||
+      !Number.isFinite(details.r2)) {
+    return `<p>No chart is available because the existing regression does not have at least three fitted runs.</p>`;
+  }
+  const width = 680;
+  const height = 340;
+  const left = 72;
+  const right = width - 28;
+  const top = 24;
+  const bottom = height - 58;
+  const minX = Math.min(...points.map(point => point.x));
+  const maxX = Math.max(...points.map(point => point.x));
+  const lineYValues = [details.slope * minX + details.intercept, details.slope * maxX + details.intercept];
+  const allY = [...points.map(point => point.y), ...lineYValues];
+  const rangeY = Math.max(...allY) - Math.min(...allY) || 0.2;
+  const minY = Math.min(...allY) - rangeY * 0.1;
+  const maxY = Math.max(...allY) + rangeY * 0.1;
+  const x = value => left + (value - minX) / (maxX - minX) * (right - left);
+  const y = value => bottom - (value - minY) / (maxY - minY) * (bottom - top);
+  const horizontalGrid = Array.from({ length: 5 }, (_, index) => {
+    const value = minY + (maxY - minY) * index / 4;
+    const yPosition = y(value);
+    return `<line x1="${left}" y1="${yPosition}" x2="${right}" y2="${yPosition}" class="minimum-regression-grid"></line><text x="${left - 8}" y="${yPosition + 4}" class="minimum-regression-tick" text-anchor="end">${value.toFixed(3)}</text>`;
+  }).join("");
+  const verticalGrid = Array.from({ length: 5 }, (_, index) => {
+    const value = minX + (maxX - minX) * index / 4;
+    const xPosition = x(value);
+    return `<line x1="${xPosition}" y1="${top}" x2="${xPosition}" y2="${bottom}" class="minimum-regression-grid"></line><text x="${xPosition}" y="${bottom + 20}" class="minimum-regression-tick" text-anchor="middle">${value.toFixed(1)}</text>`;
+  }).join("");
+  const regressionLine = `<line x1="${x(minX)}" y1="${y(details.slope * minX + details.intercept)}" x2="${x(maxX)}" y2="${y(details.slope * maxX + details.intercept)}" class="minimum-regression-fit-line"></line>`;
+  const dataPoints = points.map(point =>
+    `<circle cx="${x(point.x)}" cy="${y(point.y)}" r="6" class="minimum-regression-fit-point"><title>Included run ${escapeHtml(point.injectionNo || "?")}: ${point.x}% B, log10(k) ${point.y.toFixed(6)}</title></circle>`
+  ).join("");
+  return `<figure class="minimum-regression-figure">
+    <svg class="minimum-regression-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Noise-filtered log10 retention factor against percent B with only runs included in the existing R-squared fit and the fitted straight line">
+      <title>log10(k) versus %B — runs retained by the existing R²-filtered regression</title>
+      ${horizontalGrid}${verticalGrid}
+      <line x1="${left}" y1="${bottom}" x2="${right}" y2="${bottom}" class="minimum-regression-axis"></line>
+      <line x1="${left}" y1="${top}" x2="${left}" y2="${bottom}" class="minimum-regression-axis"></line>
+      ${regressionLine}${dataPoints}
+      <text x="${(left + right) / 2}" y="${height - 12}" class="minimum-regression-axis-label" text-anchor="middle">%B</text>
+      <text x="18" y="${(top + bottom) / 2}" class="minimum-regression-axis-label" text-anchor="middle" transform="rotate(-90 18 ${(top + bottom) / 2})">log10(k)</text>
+    </svg>
+    <figcaption>Points and fitted line include only runs retained by the existing R² filtering.</figcaption>
+  </figure>`;
+}
+function renderMinimumPercentBCalculation(trial) {
+  const details = trial?.minimumPercentBCalculationDetails;
+  if (!details) return "<p>Minimum %B calculation details are unavailable for this run.</p>";
+  const format = (value, digits = 3) => Number.isFinite(value) ? value.toFixed(digits) : "—";
+  const rows = details.rows.map(row => `<tr class="${row.used ? "minimum-regression-included" : ""}">
+    <td>${escapeHtml(String(row.injectionNo || "—"))}</td>
+    <td>${format(row.percentB, 2)}</td>
+    <td>${format(row.t0)}</td>
+    <td>${format(row.retention)}</td>
+    <td>${format(row.k, 6)}</td>
+    <td>${format(row.log10K, 6)}</td>
+    <td>${escapeHtml(row.fitStatus)}</td>
+  </tr>`).join("");
+  const calculation = Number.isFinite(details.slope) && Number.isFinite(details.intercept)
+    ? `<div class="table-wrap"><table class="equipment-info-table minimum-regression-summary"><tbody>
+        <tr><th scope="row">Fitted equation</th><td>log10(k) = ${format(details.slope, 8)} × %B + (${format(details.intercept, 8)})</td></tr>
+        <tr><th scope="row">R²</th><td>${format(details.r2, 6)} (required ≥ ${details.r2Threshold.toFixed(2)}); ${details.fitPoints.length} run(s) retained in fit</td></tr>
+        <tr><th scope="row">Average filtered t0 of fitted runs</th><td>${format(details.averageT0)} min</td></tr>
+        <tr><th scope="row">Target last-peak retention (specification)</th><td>${format(details.targetRetention)} min</td></tr>
+        <tr><th scope="row">Target k = (target tR − average t0) / average t0</th><td>${format(details.targetK, 6)}</td></tr>
+        <tr><th scope="row">Target log10(k)</th><td>${format(details.targetLog10K, 6)}</td></tr>
+        <tr><th scope="row">Solved %B = (target log10(k) − intercept) / slope</th><td>${Number.isFinite(details.predictedPercentB) ? `${format(details.predictedPercentB, 6)}% B` : "Not available"}</td></tr>
+        <tr><th scope="row">Proposed Minimum %B</th><td>${Number.isFinite(details.result)
+          ? `${details.result}% B after the existing whole-percent rounding`
+          : escapeHtml(String(details.result))}</td></tr>
+      </tbody></table></div>`
+    : `<p>Minimum %B result: ${escapeHtml(String(details.result))}. The existing regression needs at least three usable runs and an R² at or above ${details.r2Threshold.toFixed(2)} to produce a fit.</p>`;
+  return `<p>Run data below is from the applicable ambient regression cycle. t0 and last-peak tR use peaks retained after the existing noise filter. Runs marked as included are the only points shown in the plot and used in the fitted equation.</p>
+    <div class="table-wrap"><table class="equipment-info-table minimum-regression-table">
+      <thead><tr><th>Injection</th><th>%B</th><th>t0 (min)</th><th>Last-peak tR (min)</th><th>k</th><th>log10(k)</th><th>Fit status</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="7">No eligible ambient runs in this regression cycle.</td></tr>`}</tbody>
+    </table></div>
+    ${renderMinimumRegressionChart(details)}
+    ${calculation}`;
 }
 function selectivityEquipmentTarget(stageIndex) {
   if ([1, 2, 4, 5, 7, 8].includes(stageIndex)) {
@@ -2100,7 +2303,9 @@ function renderPumpPercentBRelationship(trial) {
       : decisionContext?.kind === "minimum-then"
         ? "Run Minimum %B THEN Intermediate %B"
         : decisionContext?.kind === "minimum-or"
-          ? "Run Minimum %B OR user-confirmed Intermediate %B"
+          ? decisionContext.includeMinimumCalculation
+            ? "Run calculated Minimum %B"
+            : "Use OBSERVE to compare runs and confirm Intermediate %B"
           : "";
   const displayedPercentB = Number.isFinite(decisionContext?.percentB)
     ? `${decisionContext.percentB}% B`
@@ -2110,19 +2315,24 @@ function renderPumpPercentBRelationship(trial) {
         <tr><th scope="row">Back-pressure</th><td>${escapeHtml(shown(trial.pressure, " psi"))} — <span class="measurement-status ${hasValidatedSpecifications ? pressureStatus.className : "status-unavailable"}">${pressureStatus.label}</span>${hasValidatedSpecifications ? `; maximum ${escapeHtml(String(spec.pressure))} psi` : ""}</td></tr>
         <tr><th scope="row">Peak count</th><td>${escapeHtml(shown(trial.peakCount))} — <span class="measurement-status ${hasValidatedSpecifications ? peakStatus.className : "status-unavailable"}">${peakStatus.label}</span>${hasValidatedSpecifications ? `; target ${escapeHtml(String(spec.peaks))}` : ""}</td></tr>
         <tr><th scope="row">Total retention time</th><td>${escapeHtml(shown(runTime, " min"))} — <span class="measurement-status ${hasValidatedSpecifications ? runtimeStatus.className : "status-unavailable"}">${runtimeStatus.label}</span>${hasValidatedSpecifications ? `; maximum ${escapeHtml(String(spec.time))} min; ${runtimeStatus.label === "FAIL" ? "10-point decrease runtime check fails" : "10-point decrease runtime check passes"}` : ""}</td></tr>
-        <tr><th scope="row">Selected action</th><td>${escapeHtml(selectedAction || "Minimum / Intermediate %B sequence")}${decisionContext?.kind === "minimum-then" ? " — Minimum first; Intermediate follows an OBSERVE confirmation." : decisionContext?.kind === "minimum-or" ? " — choose Minimum or confirm Intermediate in OBSERVE." : ""}</td></tr>
+        <tr><th scope="row">Selected action</th><td>${escapeHtml(selectedAction || "Minimum / Intermediate %B sequence")}${decisionContext?.kind === "minimum-then" ? " — Minimum first; Intermediate follows an OBSERVE confirmation." : ""}</td></tr>
         <tr><th scope="row">Selected / proposed %B</th><td>${escapeHtml(displayedPercentB)}</td></tr>
       </tbody></table></div>`
     : "";
   const minimumIntermediateGuidance = isMinimumIntermediate
     ? `<h5>Purpose</h5>
-      <p>${decisionContext.kind === "intermediate" || decisionContext.kind === "minimum-or"
-        ? decisionContext.kind === "minimum-or"
-          ? "Run calculated Minimum %B to investigate early retention and spacing, or use OBSERVE to compare retention-cycle runs and confirm an Intermediate %B between tested conditions."
-          : "Refine the mobile-phase composition between the tested conditions by observing peak movement and confirming an Intermediate %B."
-        : "Optimise peak spacing by finding Minimum %B from the course-based retention-factor-versus-%B regression."}</p>
-      <h5>Evidence to review</h5>
-      <p>Review early-peak retention factors (k′), selectivity between neighbouring compounds, measured resolution, and whether the total run time remains acceptable. For Intermediate %B, compare the best retention-cycle runs, focusing on peak separation and total retention time. The tool cannot reliably track compound identity or choose the best intermediate automatically.</p>
+      ${decisionContext.kind === "minimum-or"
+        ? `<ul class="minimum-intermediate-purpose">
+            <li>Run calculated Minimum %B to investigate early retention and spacing.</li>
+            <li>Or, use OBSERVE to compare retention-cycle runs and confirm an Intermediate %B between tested conditions.</li>
+          </ul>`
+        : `<p>${decisionContext.kind === "intermediate"
+          ? "Refine the mobile-phase composition between the tested conditions by observing peak movement and confirming an Intermediate %B."
+          : "Optimise peak spacing by finding Minimum %B from the course-based retention-factor-versus-%B regression."}</p>`}
+      ${(decisionContext.includeMinimumCalculation ??
+        ["minimum", "minimum-or", "minimum-then"].includes(decisionContext.kind))
+        ? `<h5>Minimum %B calculations</h5>${renderMinimumPercentBCalculation(trial)}`
+        : ""}
       <h5>Expected Chromatographic Effects</h5>
       ${renderEffectFlow([
         ["Retention time", decisionContext.kind === "minimum" || decisionContext.kind === "minimum-then"
@@ -2185,6 +2395,254 @@ function renderPumpPercentBRelationship(trial) {
     ${Number.isInteger(selectedRun) ? `<button type="button" class="return-to-decision" data-source-index="${selectedRun}">Return to this run's decision</button>` : ""}
   </section>`;
 }
+const EFFICIENCY_PROPOSAL_FIELDS = [
+  ["length", "Column length (mm)"],
+  ["diameter", "Internal diameter (mm)"],
+  ["particleSize", "Particle size (µm)"],
+  ["flow", "Flow rate (mL/min)"]
+];
+function efficiencyActionFields(recommendation) {
+  if (/Decrease PS \(BP\), then increase F to shorten the run/i.test(recommendation)) {
+    return ["particleSize"];
+  }
+  const fields = [];
+  if (/\bIncrease L\b/i.test(recommendation)) fields.push("length");
+  if (/\b(?:decrease|increase) F\b/i.test(recommendation)) fields.push("flow");
+  if (/\bdecrease PS\b/i.test(recommendation)) fields.push("particleSize");
+  if (/\bSPP\b/i.test(recommendation)) fields.push("packingFactor");
+  return fields;
+}
+function efficiencyFieldLabel(key) {
+  return key === "packingFactor"
+    ? "Packing type"
+    : EFFICIENCY_PROPOSAL_FIELDS.find(([field]) => field === key)?.[1] || key;
+}
+function efficiencyNumber(value, digits = 3) {
+  return Number.isFinite(value) ? Number(value.toFixed(digits)).toString() : "Not available";
+}
+function renderEfficiencyPrediction(result, current, proposal, modeName) {
+  if (!result.available) {
+    return `<p class="efficiency-calculation-status">${escapeHtml(result.reason)}</p>`;
+  }
+  const proposalPairs = [
+    ["Column length (mm)", current.length, proposal.length],
+    ["Internal diameter (mm)", current.diameter, proposal.diameter],
+    ["Particle size (µm)", current.particleSize, proposal.particleSize],
+    ["Flow rate (mL/min)", current.flow, proposal.flow],
+    ["Packing factor", current.packingFactor, proposal.packingFactor]
+  ];
+  const row = (label, currentValue, proposalValue, unit = "") =>
+    `<tr><th scope="row">${escapeHtml(label)}</th><td>${escapeHtml(`${efficiencyNumber(Number(currentValue))}${unit}`)}</td><td>${escapeHtml(`${efficiencyNumber(Number(proposalValue))}${unit}`)}</td></tr>`;
+  const valueRows = [
+    row("Column length (mm)", current.length, proposal.length),
+    row("Internal diameter (mm)", current.diameter, proposal.diameter),
+    row("Particle size (µm)", current.particleSize, proposal.particleSize),
+    row("Flow rate (mL/min)", current.flow, proposal.flow),
+    row("Packing factor", current.packingFactor, proposal.packingFactor),
+    row("Predicted first-peak t0 (min)", current.t0, result.proposedT0),
+    row("Predicted last-peak retention (min)", current.lastPeakRetention, result.predictedRetention),
+    row("Back-pressure (psi)", current.pressure, result.predictedPressure),
+    row("Linear velocity (mm/s)", current.linearVelocity, result.linearVelocity),
+    row("HETP (µm)", current.hetp, result.hetp),
+    row("Theoretical plates N", current.plateCount, result.plateCount),
+    row("Lowest Rs", current.resolution, result.predictedResolution)
+  ].join("");
+  const status = (pass, label) =>
+    `<tr><th scope="row">${escapeHtml(label)}</th><td colspan="2"><span class="measurement-status ${pass ? "status-pass" : "status-fail"}">${pass ? "PASS" : "FAIL"}</span></td></tr>`;
+  return `<h5>${escapeHtml(modeName)} prediction results</h5>
+    <div class="table-wrap"><table class="equipment-info-table">
+      <thead><tr><th>Measure</th><th>Current run</th><th>User-entered proposal</th></tr></thead>
+      <tbody>${valueRows}
+        ${status(result.runtimePass, "Last-peak retention ≤ maximum run time")}
+        ${status(result.pressurePass, "Back-pressure ≤ maximum")}
+        ${status(result.resolutionPass, "Predicted Rs ≥ resolution specification")}
+        ${status(result.flowRangePass, "A feasible flow interval exists")}
+        ${status(result.proposedFlowWithinRange, "Entered flow is within feasible interval")}
+        <tr><th scope="row">Workbook feasible flow interval (mL/min)</th><td colspan="2">${efficiencyNumber(result.minimumFlowForRetention)}–${efficiencyNumber(result.maximumFlowForPressure)}</td></tr>
+        <tr><th scope="row">Overall proposed combination</th><td colspan="2"><strong class="${result.viable ? "efficiency-viable" : "efficiency-not-viable"}">${result.viable ? "VIABLE against runtime, pressure and Rs specifications" : "NOT VIABLE against one or more specifications"}</strong></td></tr>
+      </tbody>
+    </table></div>`;
+}
+function renderAwesomeEfficiencySection(trial, trialIndex) {
+  if (!trial || trialIndex < 0) return "";
+  const state = efficiencyInputsForTrial(trialIndex, trial);
+  const inferredFactor = state.coreShell === "yes"
+    ? HplcAwesomeEfficiency.SPP_FACTOR
+    : state.coreShell === "no"
+      ? 1
+      : null;
+  const currentPackingFactor = state.confirmedPackingFactor;
+  const action = trial.recommendation || "No flowchart action is currently available.";
+  const actionFields = efficiencyActionFields(trial.recommendation || "");
+  const actionField = state.modeAField || (actionFields.length === 1 ? actionFields[0] : "");
+  if (!state.modeAField && actionFields.length === 1) state.modeAField = actionField;
+  const current = {
+    peakCount: trial.peakCount,
+    resolution: trial.resolution,
+    length: Number(trial.length),
+    diameter: Number(trial.diameter),
+    particleSize: Number(trial.particleSize),
+    flow: Number(trial.flow),
+    t0: trial.t0,
+    lastPeakRetention: decisionRunTime(trial),
+    pressure: trial.pressure
+  };
+  const limits = {
+    maxRunTime: specifications().time,
+    maxPressure: specifications().pressure,
+    resolution: specifications().resolution
+  };
+  const floor = HplcAwesomeEfficiency.calculateRsFloor(current, limits, currentPackingFactor);
+  const currentN = currentPackingFactor === null
+    ? null
+    : HplcAwesomeEfficiency.predictCombination(
+      current, limits,
+      {
+        length: current.length, diameter: current.diameter, particleSize: current.particleSize,
+        flow: current.flow, packingFactor: currentPackingFactor
+      },
+      currentPackingFactor
+    );
+  const currentValues = currentN?.available
+    ? {
+      ...current,
+      linearVelocity: currentN.linearVelocity,
+      hetp: currentN.hetp,
+      plateCount: currentN.plateCount,
+      packingFactor: currentPackingFactor
+    }
+    : { ...current, linearVelocity: null, hetp: null, plateCount: null, packingFactor: currentPackingFactor };
+  let modeAResult = null;
+  let modeAProposal = null;
+  if (actionField && actionFields.includes(actionField) && currentPackingFactor !== null) {
+    modeAProposal = {
+      length: current.length,
+      diameter: current.diameter,
+      particleSize: current.particleSize,
+      flow: current.flow,
+      packingFactor: currentPackingFactor
+    };
+    if (actionField === "packingFactor") {
+      modeAProposal.packingFactor = Number(state.modeAPackingFactor);
+    } else {
+      modeAProposal[actionField] = Number(state.modeAValue);
+    }
+    if (actionField === "packingFactor" ? state.modeAPackingFactor : state.modeAValue) {
+      modeAResult = HplcAwesomeEfficiency.predictCombination(current, limits, modeAProposal, currentPackingFactor);
+    }
+  }
+  let combinationResult = null;
+  const combinationProposal = {
+    length: Number(state.combinationLength),
+    diameter: Number(state.combinationDiameter),
+    particleSize: Number(state.combinationParticleSize),
+    flow: Number(state.combinationFlow),
+    packingFactor: Number(state.combinationPackingFactor)
+  };
+  const hasCombinationInput = [
+    "combinationLength", "combinationDiameter", "combinationParticleSize",
+    "combinationFlow", "combinationPackingFactor"
+  ].some(key => state[key] !== "");
+  if (hasCombinationInput && currentPackingFactor !== null) {
+    combinationResult = HplcAwesomeEfficiency.predictCombination(
+      current, limits, combinationProposal, currentPackingFactor
+    );
+  }
+  const modeAFieldControl = actionFields.length > 1
+    ? `<label>Choose one variable allowed by the flowchart action
+        <select data-efficiency-input="modeAField">
+          <option value="">Choose the single variable to change</option>
+          ${actionFields.map(field => `<option value="${field}"${actionField === field ? " selected" : ""}>${escapeHtml(efficiencyFieldLabel(field))}</option>`).join("")}
+        </select>
+      </label>`
+    : "";
+  const modeAControl = !actionFields.length
+    ? `<p class="muted">This flowchart action does not prescribe an efficiency parameter change. Retention/selectivity actions remain separate.</p>`
+    : actionField === "packingFactor"
+      ? `<label>Proposed packing type
+          <select data-efficiency-input="modeAPackingFactor">
+            <option value="">Choose proposed packing type</option>
+            <option value="1"${state.modeAPackingFactor === "1" ? " selected" : ""}>Fully porous (factor 1.0)</option>
+            <option value="1.5"${state.modeAPackingFactor === "1.5" ? " selected" : ""}>SPP (factor 1.5)</option>
+          </select>
+        </label>`
+      : actionField
+        ? `<label>Proposed ${escapeHtml(efficiencyFieldLabel(actionField))}
+            <input type="number" min="0" step="any" data-efficiency-input="modeAValue" value="${escapeHtml(state.modeAValue)}" placeholder="Enter proposed value">
+          </label>`
+        : `<p class="muted">Choose one permitted parameter above. Do not change other conditions.</p>`;
+  const proposalControls = EFFICIENCY_PROPOSAL_FIELDS.map(([key, label]) =>
+    `<label>${escapeHtml(label)}
+      <input type="number" min="0" step="any" data-efficiency-input="combination${key[0].toUpperCase()}${key.slice(1)}" value="${escapeHtml(state[`combination${key[0].toUpperCase()}${key.slice(1)}`])}" placeholder="Enter proposed value">
+    </label>`
+  ).join("");
+  const floorMessage = floor.available
+    ? `<p><strong>Rs floor:</strong> fully porous ${efficiencyNumber(floor.fullyPorousFloor)}; SPP ${efficiencyNumber(floor.sppFloor)}. <strong>Assessment:</strong> ${escapeHtml(floor.verdict)}.</p>`
+    : `<p class="efficiency-calculation-status"><strong>Rs floor:</strong> ${escapeHtml(floor.reason)}</p>`;
+  return `<section class="awesome-efficiency-panel" aria-labelledby="awesomeEfficiencyHeading">
+    <h4 id="awesomeEfficiencyHeading">Efficiency Predictions — optional workbook-based estimates</h4>
+    <p>These estimates are separate from the flowchart-prescribed action. Proposed values are not automatically selected, do not modify the uploaded run, and do not alter retention/selectivity history.</p>
+    <div class="efficiency-current-packing">
+      <label>Current column CoreShell status
+        <select data-efficiency-input="coreShell">
+          <option value=""${state.coreShell === "" ? " selected" : ""}>Confirm/correct status</option>
+          <option value="no"${state.coreShell === "no" ? " selected" : ""}>No</option>
+          <option value="yes"${state.coreShell === "yes" ? " selected" : ""}>Yes</option>
+        </select>
+      </label>
+      <p>Resulting workbook packing factor: <strong>${inferredFactor === null ? "not selected" : inferredFactor.toFixed(1)}</strong>${inferredFactor === null ? "" : ` (${inferredFactor === 1.5 ? "SPP" : "fully porous"})`}.</p>
+      <button type="button" data-efficiency-action="confirm-packing"${inferredFactor === null ? " disabled" : ""}>${currentPackingFactor === null ? "Confirm current packing factor" : `Confirmed current factor: ${currentPackingFactor.toFixed(1)} · change/confirm again`}</button>
+    </div>
+    <div id="efficiencyFloorResult">${floorMessage}</div>
+    <details class="efficiency-equations">
+      <summary>Workbook equations and assumptions</summary>
+      <p>Van Deemter constants from the workbook: A = 1.5, B = 3, C = 0.15; fully porous packing factor = 1.0; SPP factor = 1.5. The workbook calculates HETP = (A·PS + B/µ + C·PS²·µ) / packing factor, µ = L/t0/60, and N = L·1000/HETP. The Rs floor uses headroom = √((maximum BP/current BP)·(maximum tR/current tR)); Nmax fully porous = 1000·L·headroom / (PS·(A + 2√(B·C))); Nmax SPP = 1.5·Nmax fully porous; Rs floor = Rs specification·√(current N/Nmax).</p>
+      <p>For a proposal: t0 and last-peak tR scale by (current F/proposed F)·(proposed ID/current ID)²·(proposed L/current L). Back-pressure scales by (proposed L·proposed F)/(current L·current F)·((current PS·current ID)/(proposed PS·proposed ID))². Proposed HETP and N use the same Van Deemter equation; predicted Rs = current Rs·√(proposed N/current N). The workbook flow interval is the minimum flow satisfying run-time and the maximum flow satisfying pressure.</p>
+    </details>
+    <section class="efficiency-mode">
+      <h5>Mode A — Flowchart-prescribed next-run prediction</h5>
+      <p><strong>Prescribed action:</strong> ${escapeHtml(action)}</p>
+      ${modeAFieldControl}${modeAControl}
+      <div id="efficiencyModeAResults">${modeAResult
+        ? renderEfficiencyPrediction(modeAResult, currentValues, modeAProposal, "Mode A")
+        : `<p class="muted">Enter a proposed value for the single permitted change to calculate consequences. All other method settings remain fixed.</p>`}
+      </div>
+    </section>
+    <section class="efficiency-mode">
+      <h5>Mode B — Optional efficiency combination checker</h5>
+      <p>Enter every proposed value you want evaluated. This check is exploratory and never replaces Mode A's prescribed action.</p>
+      <div class="efficiency-proposal-grid">${proposalControls}
+        <label>Proposed packing type
+          <select data-efficiency-input="combinationPackingFactor">
+            <option value="">Choose proposed packing type</option>
+            <option value="1"${state.combinationPackingFactor === "1" ? " selected" : ""}>Fully porous (factor 1.0)</option>
+            <option value="1.5"${state.combinationPackingFactor === "1.5" ? " selected" : ""}>SPP (factor 1.5)</option>
+          </select>
+        </label>
+      </div>
+      <div id="efficiencyCombinationResults">${combinationResult
+        ? renderEfficiencyPrediction(combinationResult, currentValues, combinationProposal, "Mode B")
+        : `<p class="muted">No combination is evaluated until the proposed values are entered.</p>`}
+      </div>
+    </section>
+  </section>`;
+}
+function refreshEfficiencyOutputBlocks(trialIndex) {
+  const trial = trials[trialIndex];
+  if (!trial) return;
+  const rendered = document.createElement("div");
+  rendered.innerHTML = renderAwesomeEfficiencySection(trial, trialIndex);
+  ["efficiencyFloorResult", "efficiencyModeAResults", "efficiencyCombinationResults"].forEach(id => {
+    const current = $(id);
+    const next = rendered.querySelector(`#${id}`);
+    if (current && next) current.innerHTML = next.innerHTML;
+  });
+}
+function recalculateRecommendationsAfterPackingConfirmation() {
+  trials.forEach(updateRecommendation);
+  renderTrials();
+  renderEquipment();
+}
 function renderEquipmentParameter(module, parameter, trial) {
   const failureWarning = module.title === "Degasser" && parameter.otherEffects.includes("Failure signs")
     ? "equipment-failure-warning"
@@ -2211,11 +2669,17 @@ function renderEquipmentParameter(module, parameter, trial) {
     : null;
   const showSelectivityRelationship = selectivityTarget?.module === activeEquipmentModule &&
     selectivityTarget.parameter === parameter.name;
+  const selectedTrialIndex = currentViewedTrialIndex ?? parameterTrialIndex;
+  const showEfficiencyPredictions = module.title === "Column/Column Oven" &&
+    parameter.name === "Column Length" &&
+    Number.isInteger(selectedTrialIndex) &&
+    trials[selectedTrialIndex] === trial;
   return `<section class="equipment-parameter-card"${relationshipId} aria-live="polite">
     <h4>${escapeHtml(parameter.name)}</h4>
     <div class="table-wrap"><table class="equipment-info-table"><tbody>${fields}</tbody></table></div>
     ${isPumpPercentB ? renderPumpPercentBRelationship(trial) : ""}
     ${showSelectivityRelationship ? renderSelectivityDecisionRelationship(trial, activeSelectivityDecision) : ""}
+    ${showEfficiencyPredictions ? renderAwesomeEfficiencySection(trial, selectedTrialIndex) : ""}
   </section>`;
 }
 function renderEquipment() {
@@ -2612,17 +3076,24 @@ function trialRow(trial, fallbackNumber, recommendation, canDelete = false, sour
         ? "intermediate"
         : ""
     : trial.recommendation === "Jump to Minimum %B OR Intermediate %B"
-      ? "minimum-or"
+      ? trial.minimumIntermediateChoice === "intermediate" ? "intermediate" : "minimum-or"
       : trial.recommendation === "Jump to Minimum %B THEN, Intermediate %B"
         ? "minimum-then"
         : "";
   const pumpGuidancePercentB = trial.isSuggested
     ? trial.percentB
-    : pumpGuidanceKind === "minimum-or"
-      ? trial.minimumPercentBResult
+    : trial.recommendation === "Jump to Minimum %B OR Intermediate %B" &&
+      trial.minimumIntermediateChoice === "observe"
+      ? null
+      : trial.recommendation === "Jump to Minimum %B OR Intermediate %B" &&
+        trial.minimumIntermediateChoice === "intermediate"
+        ? trial.confirmedIntermediatePercentB
       : trial.minimumPercentBResult;
   const pumpGuidanceButton = pumpGuidanceKind && Number.isInteger(trial.isSuggested ? trial.sourceTrialIndex : sourceIndex)
-    ? `<br><button type="button" class="view-minimum-intermediate-guidance" data-source-index="${trial.isSuggested ? trial.sourceTrialIndex : sourceIndex}" data-pump-action="${trial.isSuggested && trial.suggestionType === "intermediate" ? "intermediate" : pumpGuidanceKind}"${Number.isFinite(pumpGuidancePercentB) ? ` data-pump-percentb="${pumpGuidancePercentB}"` : ""}>Open Pump %B composition guidance</button>`
+    ? `<br><button type="button" class="view-minimum-intermediate-guidance" data-source-index="${trial.isSuggested ? trial.sourceTrialIndex : sourceIndex}" data-pump-action="${trial.isSuggested && trial.suggestionType === "intermediate" ? "intermediate" : pumpGuidanceKind}" data-pump-minimum-selected="${trial.isSuggested
+      ? trial.suggestionType === "minimum"
+      : trial.recommendation === "Jump to Minimum %B THEN, Intermediate %B" ||
+        trial.minimumIntermediateChoice !== "observe" && trial.minimumIntermediateChoice !== "intermediate"}"${Number.isFinite(pumpGuidancePercentB) ? ` data-pump-percentb="${pumpGuidancePercentB}"` : ""}>Open Pump %B composition guidance</button>`
     : "";
   const selectivityStageIndex = trial.sequencePlan?.kind === "selectivity"
     ? Number(trial.sequencePlan.stageIndex)
@@ -2634,8 +3105,11 @@ function trialRow(trial, fallbackNumber, recommendation, canDelete = false, sour
   const selectivityGuidanceButton = selectivityTarget && Number.isInteger(trial.isSuggested ? trial.sourceTrialIndex : sourceIndex)
     ? `<br><button type="button" class="view-selectivity-guidance" data-source-index="${trial.isSuggested ? trial.sourceTrialIndex : sourceIndex}" data-stage-index="${selectivityStageIndex}" data-equipment-module="${selectivityTarget.module}" data-equipment-parameter="${escapeHtml(selectivityTarget.parameter)}" data-stage-solvent="${escapeHtml(selectivityPrediction.solvent || trial.sequencePlan.stage?.solvent || trial.solvent || "")}" data-stage-temperature="${escapeHtml(String(selectivityPrediction.temperature ?? trial.sequencePlan.stage?.temperature ?? ""))}" data-stage-percentb="${escapeHtml(String(selectivityPrediction.percentB ?? trial.percentB ?? ""))}" data-stage-ligand="${escapeHtml(selectivityPrediction.ligand || trial.sequencePlan.ligand || trial.ligand || "")}">Open Selectivity Equipment guidance</button>`
     : "";
-  const linkedDecisionCell = pumpGuidanceButton || selectivityGuidanceButton
-    ? `${decisionCell}${pumpGuidanceButton}${selectivityGuidanceButton}`
+  const efficiencyGuidanceButton = !trial.isSuggested && Number.isInteger(sourceIndex)
+    ? `<br><button type="button" class="view-efficiency-predictions" data-source-index="${sourceIndex}">Open HPLC Module Guide — Efficiency Predictions</button>`
+    : "";
+  const linkedDecisionCell = pumpGuidanceButton || selectivityGuidanceButton || efficiencyGuidanceButton
+    ? `${decisionCell}${pumpGuidanceButton}${selectivityGuidanceButton}${efficiencyGuidanceButton}`
     : decisionCell;
   return `<tr class="${classes}"${sourceAttribute}><td>${parameterShown(trial.groupNo)}</td><td>${parameterShown(trial.injectionNo || fallbackNumber)}</td>${cells}<td>${linkedDecisionCell}</td><td>${action}</td>${measuredCells}</tr>`;
 }
@@ -2664,6 +3138,7 @@ $("clearSavedRuns").addEventListener("click", () => {
   try {
     window.localStorage.removeItem(TRIALS_STORAGE_KEY);
     trials.splice(0, trials.length);
+    efficiencyInputsByTrial.clear();
     currentViewedTrialIndex = null;
     parameterTrialIndex = null;
     hasPositionedTrialTable = false;
@@ -2705,13 +3180,15 @@ document.addEventListener("click", event => {
   const pumpLink = event.target.closest(".view-pump-percent-explanation");
   const minimumIntermediateLink = event.target.closest(".view-minimum-intermediate-guidance");
   const selectivityLink = event.target.closest(".view-selectivity-guidance");
-  if (pumpLink || minimumIntermediateLink || selectivityLink) {
-    const link = pumpLink || minimumIntermediateLink || selectivityLink;
+  const efficiencyLink = event.target.closest(".view-efficiency-predictions");
+  if (pumpLink || minimumIntermediateLink || selectivityLink || efficiencyLink) {
+    const link = pumpLink || minimumIntermediateLink || selectivityLink || efficiencyLink;
     const index = Number(link.dataset.sourceIndex);
     if (!selectRunForNavigation(index)) return;
     activePumpPercentBDecision = minimumIntermediateLink
       ? {
         kind: link.dataset.pumpAction,
+        includeMinimumCalculation: link.dataset.pumpMinimumSelected === "true",
         percentB: Number.isFinite(Number(link.dataset.pumpPercentb))
           ? Number(link.dataset.pumpPercentb)
           : null
@@ -2733,6 +3210,11 @@ document.addEventListener("click", event => {
       };
       activeEquipmentModule = target.module;
       activeEquipmentParameter = target.parameter;
+    } else if (efficiencyLink) {
+      activePumpPercentBDecision = null;
+      activeSelectivityDecision = null;
+      activeEquipmentModule = "columnOven";
+      activeEquipmentParameter = "Column Length";
     } else {
       activeSelectivityDecision = null;
       activeEquipmentModule = "pump";
@@ -2760,9 +3242,46 @@ activeEquipmentParameter = module && module.parameters.length ? module.parameter
 renderEquipment();
 }));
 $("equipmentDetails").addEventListener("change", event => {
-  if (event.target.id !== "equipmentParameter") return;
-  activeEquipmentParameter = event.target.value;
-  renderEquipment();
+  if (event.target.id === "equipmentParameter") {
+    activeEquipmentParameter = event.target.value;
+    renderEquipment();
+    return;
+  }
+  const field = event.target.dataset.efficiencyInput;
+  if (!field) return;
+  const trialIndex = currentViewedTrialIndex ?? parameterTrialIndex;
+  const trial = Number.isInteger(trialIndex) ? trials[trialIndex] : null;
+  if (!trial) return;
+  const state = efficiencyInputsForTrial(trialIndex, trial);
+  if (field === "coreShell") {
+    state.coreShell = event.target.value;
+    state.confirmedPackingFactor = null;
+    recalculateRecommendationsAfterPackingConfirmation();
+  } else if (field === "modeAField" || field === "modeAPackingFactor" ||
+      field === "combinationPackingFactor") {
+    state[field] = event.target.value;
+    if (field === "modeAField") renderEquipment();
+    else refreshEfficiencyOutputBlocks(trialIndex);
+  }
+});
+$("equipmentDetails").addEventListener("input", event => {
+  const field = event.target.dataset.efficiencyInput;
+  if (!field || field === "coreShell" || field.endsWith("PackingFactor") || field === "modeAField") return;
+  const trialIndex = currentViewedTrialIndex ?? parameterTrialIndex;
+  const trial = Number.isInteger(trialIndex) ? trials[trialIndex] : null;
+  if (!trial) return;
+  efficiencyInputsForTrial(trialIndex, trial)[field] = event.target.value;
+  refreshEfficiencyOutputBlocks(trialIndex);
+});
+$("equipmentDetails").addEventListener("click", event => {
+  if (!event.target.closest('[data-efficiency-action="confirm-packing"]')) return;
+  const trialIndex = currentViewedTrialIndex ?? parameterTrialIndex;
+  const trial = Number.isInteger(trialIndex) ? trials[trialIndex] : null;
+  if (!trial) return;
+  const state = efficiencyInputsForTrial(trialIndex, trial);
+  if (!["yes", "no"].includes(state.coreShell)) return;
+  state.confirmedPackingFactor = state.coreShell === "yes" ? HplcAwesomeEfficiency.SPP_FACTOR : 1;
+  recalculateRecommendationsAfterPackingConfirmation();
 });
 $("equipmentLayout").addEventListener("click", event => {
   const button = event.target.closest("[data-injector-image]");
@@ -2823,6 +3342,9 @@ $("trialTable").addEventListener("change", event => {
   if (!trial) return;
   if (control.classList.contains("minimum-intermediate-choice")) {
     trial.minimumIntermediateChoice = control.value;
+    minimizedIntermediateObservationTrialIndex = control.value === "minimum"
+      ? trials.indexOf(trial)
+      : null;
     persistUploadedTrials();
     renderTrials();
     if (control.value === "observe") {
@@ -2872,6 +3394,15 @@ $("intermediateObservation").addEventListener("change", event => {
   }
 });
 $("intermediateObservation").addEventListener("click", event => {
+  const toggleButton = event.target.closest("#toggleIntermediateObservation");
+  if (toggleButton) {
+    const trialIndex = Number($("intermediateObservationCandidate")?.dataset.trialIndex);
+    minimizedIntermediateObservationTrialIndex = toggleButton.getAttribute("aria-expanded") === "true"
+      ? trialIndex
+      : null;
+    renderIntermediateObservation();
+    return;
+  }
   const button = event.target.closest("#confirmIntermediateObservation");
   if (!button) return;
   const trial = trials[Number(button.dataset.trialIndex)];

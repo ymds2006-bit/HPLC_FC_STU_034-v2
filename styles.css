@@ -74,6 +74,21 @@ th { background: #f5f7f9; }
 .suggestion-option-label { display: block; margin-top: 6px; font-size: .72rem; }
 .minimum-intermediate-choice, .then-intermediate-choice { margin-top: 5px; }
 .view-minimum-intermediate-guidance { margin-top: 5px; font-size: .7rem; white-space: normal; }
+.view-efficiency-predictions { margin-top: 5px; font-size: .7rem; white-space: normal; }
+.awesome-efficiency-panel { margin-top: 18px; padding: 16px; border: 2px solid #146c94; background: #f5fafc; }
+.awesome-efficiency-panel > h4 { margin: 0 0 8px; }
+.efficiency-current-packing, .efficiency-mode { margin-top: 14px; padding: 12px; border: 1px solid #b9c9d2; background: white; }
+.efficiency-current-packing { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto; align-items: end; gap: 12px; }
+.efficiency-current-packing p { margin: 0; align-self: center; }
+.efficiency-mode h5 { margin: 0 0 8px; }
+.efficiency-mode label { margin: 8px 0; }
+.efficiency-proposal-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.efficiency-equations { margin-top: 12px; padding: 10px; border: 1px solid #dbe2e8; background: white; }
+.efficiency-equations p { margin: 10px 0 0; }
+.efficiency-calculation-status { padding: 8px; border-left: 4px solid #bd8b00; background: #fff8df; }
+.efficiency-viable { color: #176b3a; }
+.efficiency-not-viable { color: #8a241b; }
+.efficiency-mode .table-wrap { margin-top: 8px; }
 .source-trial { cursor: pointer; }
 .source-trial:hover, .selected-trial { background: #fff8df; }
 .source-trial:hover > td:nth-last-child(6), .source-trial:hover > td:nth-last-child(5),
@@ -143,6 +158,20 @@ pre { max-height: 360px; overflow: auto; padding: 12px; background: #f5f7f9; fon
 .equipment-info-table { table-layout: fixed; white-space: normal; }
 .equipment-info-table th { width: 32%; font-weight: 700; }
 .equipment-info-table td { color: #34434f; overflow-wrap: anywhere; }
+.minimum-intermediate-purpose { margin: 0 0 14px; padding-left: 24px; }
+.minimum-intermediate-purpose li + li { margin-top: 6px; }
+.minimum-regression-table { min-width: 760px; }
+.minimum-regression-included > td { color: #124d2c; background: #e5f4e9; font-weight: 700; }
+.minimum-regression-summary { margin-top: 12px; }
+.minimum-regression-figure { margin: 16px 0; padding: 10px; border: 1px solid #dbe2e8; background: #fff; }
+.minimum-regression-chart { display: block; width: 100%; height: auto; }
+.minimum-regression-grid { stroke: #dbe2e8; stroke-width: 1; }
+.minimum-regression-axis { stroke: #34434f; stroke-width: 1.5; }
+.minimum-regression-tick { fill: #53616b; font-size: 11px; }
+.minimum-regression-axis-label { fill: #17212b; font-size: 13px; font-weight: 700; }
+.minimum-regression-fit-line { stroke: #a64b13; stroke-width: 3; }
+.minimum-regression-fit-point { fill: #146c94; stroke: #fff; stroke-width: 2; }
+.minimum-regression-figure figcaption { color: #53616b; font-size: .82rem; text-align: center; }
 .equipment-failure-warning { padding: 10px; border: 1px solid #b42318; color: #8a241b; background: #fff0ee; font-weight: 700; }
 .module-parameter-table { min-width: 1000px; }
 .module-parameter-table thead th { position: sticky; top: 0; z-index: 2; }
@@ -153,7 +182,10 @@ pre { max-height: 360px; overflow: auto; padding: 12px; background: #f5f7f9; fon
 .nomenclature-edit-warning[hidden] { display: none; }
 .intermediate-observation { margin: 14px 0; padding: 14px; border: 2px solid #146c94; background: #f5fbfd; }
 .intermediate-observation[hidden] { display: none; }
-.intermediate-observation h3 { margin: 0 0 8px; }
+.intermediate-observation-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.intermediate-observation-header h3 { margin: 0 0 8px; }
+.intermediate-observation-header button { flex: 0 0 auto; }
+.intermediate-observation-content[hidden] { display: none; }
 .observation-instruction { padding: 10px; border-left: 4px solid #146c94; background: #e8f4f8; font-weight: 700; }
 .observation-data-note { color: #594400; }
 .observation-runs { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; }
@@ -202,6 +234,7 @@ pre { max-height: 360px; overflow: auto; padding: 12px; background: #f5f7f9; fon
 }
 @media (max-width: 760px) {
   .observation-choice { grid-template-columns: 1fr; }
+  .efficiency-current-packing { grid-template-columns: 1fr; }
   #intermediateObservationStatus { grid-column: auto; }
   .solvent-nomogram-panel { top: 12px; right: 12px; width: calc(100vw - 24px); padding: 12px; }
   .container { padding-right: 12px; padding-left: 12px; }
